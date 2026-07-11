@@ -85,9 +85,9 @@ export class LiveSessionManager {
     try {
       this.onStateChange("processing");
 
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = localStorage.getItem("zoya_custom_api_key") || process.env.GEMINI_API_KEY;
       if (!apiKey) {
-        throw new Error("GEMINI_API_KEY is missing! Please check your AI Studio Secrets.");
+        throw new Error("GEMINI_API_KEY is missing! Please check your AI Studio Secrets or set a custom API Key in settings.");
       }
 
       this.ai = new GoogleGenAI({ apiKey, apiVersion: "v1beta" });
@@ -178,13 +178,16 @@ export class LiveSessionManager {
       this.source.connect(this.processor);
       this.processor.connect(this.audioContext.destination);
 
+      const customLiveModel = localStorage.getItem("zoya_custom_live_model") || "gemini-3.1-flash-live-preview";
+      const customVoice = localStorage.getItem("zoya_custom_voice") || voiceName;
+
       // Connect to Live API
       this.sessionPromise = (this.ai as any).live.connect({
-        model: "gemini-3.1-flash-live-preview",
+        model: customLiveModel,
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: customVoice } },
           },
           systemInstruction: dynamicSystemInstruction,
           inputAudioTranscription: { model: "models/speech-to-text" },

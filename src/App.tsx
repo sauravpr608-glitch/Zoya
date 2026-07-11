@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Mic, MicOff, Loader2, Volume2, VolumeX, Keyboard, Send, Trash2, Monitor, MonitorOff, LogOut, User, Undo2, Redo2, Sparkles, Activity, BrainCircuit, LayoutDashboard, Cpu, CloudRain, Smartphone, Battery, Menu, X } from "lucide-react";
+import { Mic, MicOff, Loader2, Volume2, VolumeX, Keyboard, Send, Trash2, Monitor, MonitorOff, LogOut, User, Undo2, Redo2, Sparkles, Activity, BrainCircuit, LayoutDashboard, Cpu, CloudRain, Smartphone, Battery, Menu, X, Settings } from "lucide-react";
 import { getZoyaResponse, getZoyaAudio, resetZoyaSession } from "./services/geminiService";
 import { processCommand } from "./services/commandService";
 import { LiveSessionManager } from "./services/liveService";
 import Visualizer from "./components/Visualizer";
 import PermissionModal from "./components/PermissionModal";
-import LoginPage from "./components/LoginPage";
 import { playPCM } from "./utils/audioUtils";
 import { motion, AnimatePresence } from "motion/react";
 import { generateDailyProgress, getEvolutionLogs } from "./services/evolutionService";
@@ -45,10 +44,19 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<ChatMessage[][]>([]);
   const messagesRef = useRef(messages);
 
-  const [isAuthenticated, setIsAuthenticated] = useState(() => !!localStorage.getItem("zoya_user_info"));
+  const [isAuthenticated, setIsAuthenticated] = useState(true);
   const [userData, setUserData] = useState(() => {
     const saved = localStorage.getItem("zoya_user_info");
-    return saved ? JSON.parse(saved) : null;
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse user info", e);
+      }
+    }
+    const defaultData = { name: "Saurav", email: "sauravpr608@gmail.com", address: "India" };
+    localStorage.setItem("zoya_user_info", JSON.stringify(defaultData));
+    return defaultData;
   });
 
   const [isLocked, setIsLocked] = useState(false);
@@ -58,6 +66,7 @@ export default function App() {
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isVoiceUnlocked, setIsVoiceUnlocked] = useState(false);
 
   const liveSessionRef = useRef<LiveSessionManager | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -115,11 +124,71 @@ export default function App() {
     localStorage.setItem("zoya_chat_history", JSON.stringify(messages));
   }, [messages]);
 
+  const handleUpdateSettings = useCallback(() => {
+    const saved = localStorage.getItem("zoya_user_info");
+    if (saved) {
+      try {
+        setUserData(JSON.parse(saved));
+      } catch (e) {
+        console.error("Failed to parse updated user info", e);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (liveSessionRef.current) {
       liveSessionRef.current.isMuted = isMuted;
     }
   }, [isMuted]);
+
+  // Expose playMobileAppVideoAd and unlockZoyaVoiceSystem to window for Android app integration
+  useEffect(() => {
+    (window as any).unlockZoyaVoiceSystem = () => {
+      console.log("Zoya Microphone Active Now");
+      setIsVoiceUnlocked(true);
+      // Auto-start listening session as soon as unlocked!
+      setIsSessionActive(true);
+      resetZoyaSession();
+      const session = new LiveSessionManager();
+      session.isMuted = isMuted;
+      liveSessionRef.current = session;
+      session.onStateChange = (state) => setAppState(state);
+      session.onMessage = (sender, text) => {
+        setMessages((prev) => [...prev, { id: Date.now().toString() + "-" + sender, sender, text }]);
+        if (sender === "zoya" && text.includes("remote_sync")) {
+          const jsonMatch = text.match(/\{.*"remote_sync":\s*"(.*)".*\}/);
+          if (jsonMatch && jsonMatch[1]) syncService.sendAction(jsonMatch[1]);
+        }
+      };
+      session.onCommand = (url) => {
+        setLatestBuildUrl(url);
+        setTimeout(() => window.open(url, "_blank"), 500);
+      };
+      session.start(userData, currentPersona.voiceName, currentPersona.instruction)
+        .catch((e: any) => {
+          setIsSessionActive(false);
+          setAppState("idle");
+          setShowPermissionModal(true);
+        });
+    };
+
+    (window as any).playMobileAppVideoAd = () => {
+      const android = (window as any).Android;
+      if (android && typeof android.showInterstitialAd === "function") {
+        android.showInterstitialAd();
+        alert("Ad starting... Baat karne ke liye mic unlock ho raha hai!");
+        (window as any).unlockZoyaVoiceSystem();
+      } else {
+        alert("Browser Testing: Direct unlocking Zoya!");
+        (window as any).unlockZoyaVoiceSystem();
+      }
+    };
+
+    return () => {
+      delete (window as any).unlockZoyaVoiceSystem;
+      delete (window as any).playMobileAppVideoAd;
+    };
+  }, [userData, currentPersona, isMuted]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -218,7 +287,13 @@ export default function App() {
       }
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText }]);
     } else {
-      responseText = await getZoyaResponse(finalTranscript, messagesRef.current, userData, (url) => setLatestBuildUrl(url));
+      responseText = await getZoyaResponse(
+        finalTranscript, 
+        messagesRef.current, 
+        userData, 
+        (url) => setLatestBuildUrl(url),
+        currentPersona.instruction
+      );
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText }]);
       if (responseText.includes("remote_sync")) {
         const jsonMatch = responseText.match(/\{.*"remote_sync":\s*"(.*)".*\}/);
@@ -228,11 +303,11 @@ export default function App() {
 
     if (!isMuted) {
       setAppState("speaking");
-      const audioBase64 = await getZoyaAudio(responseText);
+      const audioBase64 = await getZoyaAudio(responseText, currentPersona.voiceName);
       if (audioBase64) await playPCM(audioBase64);
     }
     setAppState("idle");
-  }, [isMuted, isSessionActive, userData]);
+  }, [isMuted, isSessionActive, userData, currentPersona]);
 
   const toggleListening = async () => {
     if (isSessionActive) {
@@ -245,6 +320,14 @@ export default function App() {
       setAppState("idle");
       resetZoyaSession();
     } else {
+      if (!isVoiceUnlocked) {
+        if ((window as any).playMobileAppVideoAd) {
+          (window as any).playMobileAppVideoAd();
+        } else {
+          alert("Aapka voice protocol locked hai. Ad dekhkar unlock karein!");
+        }
+        return;
+      }
       try {
         setIsSessionActive(true);
         resetZoyaSession();
@@ -308,10 +391,6 @@ export default function App() {
           <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-violet-900/30 blur-[150px] rounded-full" />
         </div>
 
-        <AnimatePresence>
-          {!isAuthenticated && <LoginPage onLogin={handleLogin} />}
-        </AnimatePresence>
-
         {showPermissionModal && <PermissionModal onClose={() => setShowPermissionModal(false)} />}
 
         <VoiceCloningModule 
@@ -324,19 +403,29 @@ export default function App() {
           }}
         />
 
-        <ZoyaDashboard isOpen={showDashboard} onClose={() => setShowDashboard(false)} userData={userData} />
-
-        <AnimatePresence>
-          {isSidebarOpen && (
-            <motion.div 
-              initial={{ opacity: 0 }} 
-              animate={{ opacity: 1 }} 
-              exit={{ opacity: 0 }} 
-              onClick={() => setIsSidebarOpen(false)}
-              className="lg:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60]"
-            />
-          )}
-        </AnimatePresence>
+        <ZoyaDashboard 
+          isOpen={showDashboard} 
+          onClose={() => setShowDashboard(false)} 
+          userData={userData} 
+          currentPersonaId={currentPersona.id}
+          onSelectPersona={setCurrentPersona}
+          isVoiceUnlocked={isVoiceUnlocked}
+          onPlayAd={() => (window as any).playMobileAppVideoAd && (window as any).playMobileAppVideoAd()}
+          onUpdateSettings={handleUpdateSettings}
+          appState={appState}
+          isSessionActive={isSessionActive}
+          onToggleListening={toggleListening}
+          isMuted={isMuted}
+          onToggleMute={toggleMute}
+          isScreenSharing={isScreenSharing}
+          onToggleScreenShare={toggleScreenShare}
+          messages={messages}
+          onClearMessages={() => setMessages([])}
+          onSendTextCommand={handleTextCommand}
+          latestBuildUrl={latestBuildUrl}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+        />
 
         <AnimatePresence>
           {isLocked && (
@@ -353,225 +442,57 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <div className="relative flex-1 flex h-full w-full overflow-hidden z-10">
-          {/* Sidebar */}
-          <aside className={`
-            fixed lg:static inset-y-0 left-0 z-[100] w-72 flex flex-col bg-[#05060b] lg:bg-black/40 border-r border-white/5 backdrop-blur-3xl shrink-0 transition-all duration-500 ease-out
-            ${isSidebarOpen ? "translate-x-0 opacity-100" : "-translate-x-full lg:translate-x-0 opacity-0 lg:opacity-100"}
-          `}>
-            <div className="p-8 pb-4">
-              <div className="flex items-center justify-between mb-10">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-violet-600 flex items-center justify-center font-bold text-lg shadow-[0_0_20px_rgba(37,99,235,0.3)]">Z</div>
-                  <div>
-                    <h1 className="text-lg font-black tracking-tighter uppercase leading-none">Zoya OS</h1>
-                    <span className="text-[10px] font-bold text-white/30 uppercase tracking-[0.3em]">Master V1.4</span>
-                  </div>
-                </div>
-                <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 text-white/40 hover:text-white">
-                  <X size={20} />
-                </button>
+        {/* Minimalistic, Ultra-Clean Main UI */}
+        <div className="relative flex-1 flex flex-col h-full w-full overflow-hidden z-10 p-6 sm:p-10">
+          {/* Main Clean Header */}
+          <header className="flex justify-between items-center w-full shrink-0">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-violet-600 flex items-center justify-center font-bold text-lg shadow-[0_0_20px_rgba(37,99,235,0.3)]">
+                Z
               </div>
-
-              <nav className="space-y-1.5">
-                {[
-                  { icon: <Sparkles size={18} />, label: "Creative Hub", color: "text-blue-400", cmd: "Saurav, Creative Hub se aap images aur creative content generate kar sakte hain." },
-                  { icon: <Activity size={18} />, label: "Neural Flow", color: "text-cyan-400", cmd: "Neural Flow active hai! Main aapke commands aur thoughts ko process kar rahi hoon." },
-                  { icon: <BrainCircuit size={18} />, label: "Logic Core", color: "text-violet-400", cmd: "Logic Core optimized hai. Main complex coding aur analysis ke liye taiyar hoon." },
-                  { icon: <LayoutDashboard size={18} />, label: "Console", color: "text-emerald-400", cmd: "Console synced! Yahan se aap mere evolution logs aur builds track kar sakte hain." },
-                ].map((item, i) => (
-                  <button 
-                    key={i} 
-                    onClick={() => {
-                      setMessages(prev => [...prev, { id: Date.now().toString(), sender: "zoya", text: item.cmd }]);
-                      if (window.innerWidth < 1024) setIsSidebarOpen(false);
-                    }}
-                    className="w-full flex items-center gap-4 p-3.5 rounded-2xl hover:bg-white/5 transition-all group border border-transparent hover:border-white/10 text-left"
-                  >
-                    <div className={`${item.color} group-hover:scale-110 transition-transform`}>{item.icon}</div>
-                    <span className="text-xs font-bold uppercase tracking-widest text-white/40 group-hover:text-white">{item.label}</span>
-                  </button>
-                ))}
-              </nav>
-            </div>
-
-            <div className="mt-auto p-6 space-y-4">
-              <div className="bg-white/5 rounded-3xl p-5 border border-white/5 backdrop-blur-xl">
-                 <div className="flex justify-between items-center mb-4">
-                    <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest">Build Status</span>
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]" />
-                 </div>
-                 {latestBuildUrl ? (
-                   <button onClick={() => window.open(latestBuildUrl, "_blank")} className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all">Launch Build</button>
-                 ) : (
-                   <div className="h-10 flex items-center justify-center border border-dashed border-white/10 rounded-xl text-[9px] uppercase text-white/20 font-bold">No Active Builds</div>
-                 )}
-              </div>
-
-              <div className="flex items-center gap-3 px-2">
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-violet-600 flex items-center justify-center font-bold text-sm shadow-xl ring-2 ring-white/5">
-                  {userData?.name ? userData.name[0].toUpperCase() : "S"}
-                </div>
-                <div className="overflow-hidden">
-                  <p className="text-xs font-bold truncate">{userData?.name || "Saurav Coder"}</p>
-                  <button onClick={handleLogout} className="text-[10px] text-white/30 hover:text-red-400 transition-colors uppercase font-bold tracking-tighter">Sign Out</button>
-                </div>
+              <div>
+                <h1 className="text-base font-black tracking-tighter uppercase leading-none">Zoya OS</h1>
+                <span className="text-[9px] font-bold text-white/30 uppercase tracking-[0.3em]">Neural Interface v1.4</span>
               </div>
             </div>
-          </aside>
 
-          {/* Main Visualizer */}
+            {/* Glowing Unified Settings Option Button */}
+            <button 
+              onClick={() => setShowDashboard(true)}
+              className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-blue-600/10 hover:bg-blue-600/20 border border-blue-500/30 text-blue-400 hover:text-white hover:scale-105 active:scale-95 transition-all shadow-[0_0_25px_rgba(37,99,235,0.25)]"
+              id="unified-settings-button"
+            >
+              <Settings size={16} className="animate-pulse" />
+              <span className="text-[11px] font-bold uppercase tracking-widest">Settings & Controls</span>
+            </button>
+          </header>
+
+          {/* Central Immersive Visualizer Area */}
           <main className="flex-1 flex flex-col items-center justify-center relative min-w-0">
-             <div className="absolute top-8 left-0 right-0 lg:left-12 lg:right-auto z-40 px-6 flex items-center justify-between lg:block">
-                <button 
-                  onClick={() => setIsSidebarOpen(true)}
-                  className="lg:hidden p-3 bg-white/5 border border-white/10 rounded-xl text-white/60 hover:bg-white/10 transition-all"
-                >
-                  <Menu size={20} />
-                </button>
+            {/* Ambient status overlay */}
+            <div className="absolute top-12 text-center select-none pointer-events-none">
+              <div className="flex items-center gap-2 mb-1 justify-center">
+                <div className={`w-2 h-2 rounded-full ${isSessionActive ? "bg-red-500 animate-ping" : "bg-blue-500 animate-pulse"}`} />
+                <span className="text-[10px] font-bold uppercase tracking-[0.4em] text-blue-400/80">
+                  {isSessionActive ? "Audio Link Streaming" : "Neural Link Standing By"}
+                </span>
+              </div>
+              <p className="text-xs text-white/40 uppercase tracking-widest font-mono">
+                {appState === "idle" ? `Zoya Voice: ${currentPersona.name}` : `Zoya: ${appState}...`}
+              </p>
+            </div>
 
-                <div className="text-center lg:text-left flex-1 lg:flex-none">
-                  <div className="flex items-center gap-2 mb-1 justify-center lg:justify-start">
-                     <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                     <span className="text-[10px] font-bold uppercase tracking-[0.4em] text-blue-400/80">Neural Link Active</span>
-                  </div>
-                  <h2 className="text-xl md:text-2xl font-black tracking-tighter uppercase leading-none opacity-90 italic">Hybrid Mind Environment</h2>
-                </div>
+            <div className="w-full max-w-xl aspect-video flex items-center justify-center scale-110 lg:scale-125 transition-transform duration-500">
+              <Visualizer state={appState} isAnimeMode={userData?.isAnimeMode} />
+            </div>
 
-                <button 
-                  onClick={() => setShowDashboard(true)}
-                  className="lg:hidden p-3 bg-blue-600/20 border border-blue-500/30 rounded-xl text-blue-400 shadow-[0_0_15px_rgba(37,99,235,0.2)]"
-                >
-                  <LayoutDashboard size={20} />
-                </button>
-             </div>
-
-             <div className="w-full max-w-2xl aspect-video flex items-center justify-center scale-110 lg:scale-125">
-                <Visualizer state={appState} isAnimeMode={userData?.isAnimeMode} />
-             </div>
-
-             {/* Quick Access Tools (Mobile Focused Grid) */}
-             {!isSessionActive && (
-               <div className="absolute inset-x-0 bottom-32 lg:bottom-40 px-6 flex flex-col items-center gap-4 z-40">
-                 <div className="flex items-center gap-2 mb-2 opacity-30">
-                    <div className="h-[1px] w-8 bg-white" />
-                    <span className="text-[9px] font-bold uppercase tracking-[0.3em]">Quick Access Nodes</span>
-                    <div className="h-[1px] w-8 bg-white" />
-                 </div>
-                 <div className="grid grid-cols-4 lg:grid-cols-4 gap-3 lg:gap-4 w-full max-w-sm">
-                    {[
-                      { icon: <Sparkles size={20} />, label: "Images", color: "bg-blue-500/10 text-blue-400" },
-                      { icon: <Monitor size={20} />, label: "Builds", color: "bg-cyan-500/10 text-cyan-400" },
-                      { icon: <Activity size={20} />, label: "Sync", color: "bg-emerald-500/10 text-emerald-400" },
-                      { icon: <LayoutDashboard size={20} />, label: "System", color: "bg-violet-500/10 text-violet-400" },
-                    ].map((item, i) => (
-                      <button 
-                        key={i}
-                        onClick={() => {
-                          if (item.label === "System" || item.label === "Sync") setShowDashboard(true);
-                          else setMessages(prev => [...prev, { id: Date.now().toString(), sender: "zoya", text: `Opening ${item.label} protocol... Searching for active requests.` }]);
-                        }}
-                        className="flex flex-col items-center gap-2 group"
-                      >
-                        <div className={`w-14 h-14 rounded-2xl ${item.color} flex items-center justify-center border border-white/5 group-active:scale-90 transition-all shadow-lg`}>
-                          {item.icon}
-                        </div>
-                        <span className="text-[9px] font-bold uppercase tracking-widest text-white/40">{item.label}</span>
-                      </button>
-                    ))}
-                 </div>
-               </div>
-             )}
-
-             {/* Controls */}
-             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 w-full max-w-lg px-6 space-y-6">
-                <AnimatePresence>
-                  {showTextInput && (
-                    <motion.form initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} onSubmit={handleTextSubmit} className="flex gap-2 p-1.5 bg-black/60 border border-white/10 rounded-full backdrop-blur-3xl shadow-2xl">
-                      <input value={textInput} onChange={(e) => setTextInput(e.target.value)} placeholder="Type command..." className="flex-1 bg-transparent px-6 border-none outline-none text-sm placeholder:text-white/20" autoFocus />
-                      <button type="submit" className="p-3 bg-blue-600 hover:bg-blue-500 rounded-full transition-all shadow-[0_0_15px_rgba(37,99,235,0.4)]"><Send size={18} /></button>
-                    </motion.form>
-                  )}
-                </AnimatePresence>
-                
-                <div className="flex items-center justify-center gap-3">
-                   <button onClick={() => setShowTextInput(!showTextInput)} className={`p-5 rounded-full border transition-all ${showTextInput ? "bg-blue-600 border-blue-500 text-white" : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"}`}><Keyboard size={24} /></button>
-                   <button onClick={toggleListening} className={`flex items-center gap-4 px-12 py-5 rounded-full font-black uppercase text-sm tracking-widest transition-all border shadow-2xl ${isSessionActive ? "bg-red-500/10 text-red-500 border-red-500/40 hover:bg-red-500/20" : "bg-blue-600 text-white border-blue-400/50 hover:bg-blue-500 hover:scale-105 shadow-[0_0_30px_rgba(37,99,235,0.3)]"}`}>
-                      {isSessionActive ? <><MicOff size={24} /><span>Stop</span></> : <><Mic size={24} /><span>Connect</span></>}
-                   </button>
-                   <button onClick={toggleMute} className={`p-5 rounded-full border transition-all ${isMuted ? "bg-red-500/10 border-red-500/30 text-red-400" : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"}`}>{isMuted ? <VolumeX size={24} /> : <Volume2 size={24} />}</button>
-                </div>
-             </div>
+            {/* Central Floating Instructions */}
+            <div className="absolute bottom-8 text-center select-none max-w-xs px-4">
+              <p className="text-[10px] uppercase font-bold tracking-[0.25em] text-white/20 leading-relaxed">
+                Click "Settings & Controls" at the top right to access voice link, chat logs, intelligence overrides and custom API configurations.
+              </p>
+            </div>
           </main>
-
-          {/* Right Sidebar: Assistant & Info */}
-          <aside className="hidden xl:flex w-80 flex-col bg-black/40 border-l border-white/5 backdrop-blur-3xl shrink-0">
-             <div className="p-8 border-b border-white/5 space-y-6">
-                <div>
-                   <div className="flex justify-between items-center mb-4">
-                      <span className="text-[10px] font-bold text-white/30 uppercase tracking-[0.2em]">Environment</span>
-                      <span className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-widest">30°C HAZE</span>
-                   </div>
-                   <div className="space-y-3">
-                      {[
-                        { label: "Brain Load", value: "24%", color: "bg-blue-500", icon: <Cpu size={12} /> },
-                        { icon: <Battery size={12} />, label: "Pulse", value: "72bpm", color: "bg-emerald-500" },
-                        { label: "Sync Latency", value: "14ms", color: "bg-orange-500", icon: <Activity size={12} /> },
-                      ].map((item, i) => (
-                        <div key={i} className="flex items-center gap-3">
-                          <div className="text-white/20">{item.icon}</div>
-                          <div className="flex-1">
-                             <div className="flex justify-between text-[8px] font-black uppercase text-white/40 mb-1">
-                                <span>{item.label}</span>
-                                <span>{item.value}</span>
-                             </div>
-                             <div className="h-0.5 bg-white/5 rounded-full overflow-hidden">
-                                <motion.div initial={{ width: 0 }} animate={{ width: "60%" }} className={`h-full ${item.color} shadow-[0_0_8px_${item.color}]`} />
-                             </div>
-                          </div>
-                        </div>
-                      ))}
-                   </div>
-                </div>
-             </div>
-
-             <div className="flex-1 flex flex-col min-h-0">
-                <div className="p-6 flex items-center justify-between">
-                   <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shadow-[0_0_8px_#3b82f6]" />
-                      <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/80">Active Log</span>
-                   </div>
-                   <div className="flex gap-1">
-                      <button onClick={handleUndo} className="p-1 px-2.5 rounded-lg border border-white/5 text-white/20 hover:bg-white/5 hover:text-white"><Undo2 size={12} /></button>
-                      <button onClick={handleRedo} className="p-1 px-2.5 rounded-lg border border-white/5 text-white/20 hover:bg-white/5 hover:text-white"><Redo2 size={12} /></button>
-                   </div>
-                </div>
-
-                <div className="flex-1 overflow-y-auto px-6 space-y-4 custom-scrollbar">
-                   <AnimatePresence mode="popLayout">
-                      {messages.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center opacity-10 py-10 scale-75">
-                           <Sparkles size={48} className="mb-4" />
-                           <p className="text-[10px] uppercase font-bold tracking-[0.3em] text-center">Awaiting Pulse</p>
-                        </div>
-                      ) : (
-                        messages.map((msg, i) => (
-                          <motion.div key={msg.id} initial={{ opacity: 0, x: msg.sender === "user" ? 10 : -10 }} animate={{ opacity: 1, x: 0 }} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
-                             <span className="text-[8px] font-black uppercase tracking-widest text-white/20 mb-1 px-1">{msg.sender === "user" ? userData?.name || "User" : "Zoya"}</span>
-                             <div className={`px-4 py-3 rounded-2xl text-[11px] leading-relaxed border ${msg.sender === "user" ? "bg-blue-600/10 border-blue-500/20 text-blue-100" : "bg-white/5 border-white/5 text-white/80 italic font-serif"}`}>{msg.text}</div>
-                          </motion.div>
-                        ))
-                      )}
-                   </AnimatePresence>
-                   <div ref={messagesEndRef} />
-                </div>
-
-                <div className="p-6 border-t border-white/5 grid grid-cols-2 gap-2">
-                   <button onClick={() => { if(confirm("Flush neural logic?")) setMessages([]); }} className="py-3 rounded-xl bg-white/5 border border-white/10 text-[9px] font-bold uppercase tracking-widest hover:bg-red-500/10 hover:text-red-400 transition-all flex items-center justify-center gap-2"><Trash2 size={12} /> Flush</button>
-                   <button onClick={() => setShowDashboard(true)} className="py-3 rounded-xl bg-blue-600/10 border border-blue-500/20 text-[9px] font-bold uppercase tracking-widest text-blue-400 hover:bg-blue-600 hover:text-white transition-all flex items-center justify-center gap-2"><LayoutDashboard size={12} /> Sync</button>
-                </div>
-             </div>
-          </aside>
         </div>
       </div>
     </SwipeNavigation>

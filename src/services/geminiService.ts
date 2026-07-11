@@ -43,15 +43,20 @@ export async function getZoyaResponse(
   prompt: string, 
   history: { sender: "user" | "zoya", text: string }[] = [], 
   userData?: any,
-  onCommand?: (url: string) => void
+  onCommand?: (url: string) => void,
+  personaInstruction: string = ""
 ): Promise<string> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "", apiVersion: "v1beta" });
+    const apiKey = localStorage.getItem("zoya_custom_api_key") || process.env.GEMINI_API_KEY || "";
+    const ai = new GoogleGenAI({ apiKey, apiVersion: "v1beta" });
+    const customChatModel = localStorage.getItem("zoya_custom_chat_model") || "gemini-3-flash-preview";
     
     const userContext = userData 
       ? `\n\nCURRENT USER CONTEXT: You are talking to ${userData.name}.${userData.address ? ` They are from ${userData.address}.` : ""}${userData.email ? ` Their email is ${userData.email}.` : ""} Greet them personally and be your witty self.` 
       : "";
-    const dynamicSystemInstruction = systemInstruction + userContext;
+    
+    const personaContext = personaInstruction ? `\n\nPERSONA PROTOCOL: ${personaInstruction}` : "";
+    const dynamicSystemInstruction = systemInstruction + userContext + personaContext;
 
     const recentHistory = history.slice(-10); // Reduce history slightly for stability
     const contents: any[] = recentHistory.map(msg => ({
@@ -102,7 +107,7 @@ export async function getZoyaResponse(
     ];
 
     const generateResult = await (ai as any).models.generateContent({ 
-      model: "gemini-3-flash-preview",
+      model: customChatModel,
       contents,
       config: {
         systemInstruction: { parts: [{ text: dynamicSystemInstruction }] },
@@ -164,7 +169,7 @@ export async function getZoyaResponse(
         });
 
         const finalResult = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
+          model: customChatModel,
           contents,
           config: { 
             systemInstruction: { parts: [{ text: dynamicSystemInstruction }] },
@@ -203,18 +208,22 @@ export async function getZoyaResponse(
   }
 }
 
-export async function getZoyaAudio(text: string): Promise<string | null> {
+export async function getZoyaAudio(text: string, voiceName: string = "Kore"): Promise<string | null> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "", apiVersion: "v1beta" });
+    const apiKey = localStorage.getItem("zoya_custom_api_key") || process.env.GEMINI_API_KEY || "";
+    const ai = new GoogleGenAI({ apiKey, apiVersion: "v1beta" });
+    const customChatModel = localStorage.getItem("zoya_custom_chat_model") || "gemini-3-flash-preview";
+    const customVoice = localStorage.getItem("zoya_custom_voice") || voiceName;
+
     const response = await (ai as any).models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: customChatModel,
       contents: [{ role: "user", parts: [{ text }] }],
       config: {
         systemInstruction: { parts: [{ text: systemInstruction }] },
         responseModalities: ["AUDIO"],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Kore" },
+            prebuiltVoiceConfig: { voiceName: customVoice },
           },
         },
       }
